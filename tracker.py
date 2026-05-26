@@ -108,13 +108,22 @@ class Tracker:
 
         self.cache.fill_full(start_id)
 
-        self.label = new_label
+        self.label = np.array(new_label)
         self.prev_id = start_id
         self.curr_id = start_id + 1
-        self.pprev_box = self.curr_box                  
-        self.prev_box = np.array(self.label)[:,1:]      #保存过时的检测结果，去除类别信息
-        self.prev_cls = self.cls
-        self.cls = np.array(self.label)[:,0]
+        if self.label.ndim == 2:
+            self.prev_box = self.label[:,1:]      #保存过时的检测结果，去除类别信息
+            self.cls = self.label[:,0]
+        else:
+            self.prev_box = np.empty((0, 4))
+            self.cls = np.empty((0,))
+        self.curr_box = self.prev_box.copy()
+        self.pprev_box = self.prev_box.copy()
+        self.prev_cls = self.cls.copy()
+        self.isNewBox = np.zeros(len(self.prev_box))
+        self.NeededFix = np.zeros(len(self.prev_box))
+        self.NeededPred = np.zeros(len(self.prev_box))
+        self.speed = np.zeros([len(self.prev_box), 2])
         self.first_gray = self.cache.frames[0]
 
         t2 = time.time()
@@ -132,6 +141,8 @@ class Tracker:
         idp_id = np.insert(idp_id,0,0)
 
         p0 = self.curr_pts
+        if len(p0) == 0:
+            return 0
         features = np.expand_dims(p0.squeeze(1),0)
         for i in range(len(idp_id)-1):
             frame0, frame1 = self.cache.frames[idp_id[i]], self.cache.frames[idp_id[i+1]]
@@ -170,6 +181,8 @@ class Tracker:
     def PDP(self):
         pred_id = np.array([0,5,10])
         p0 = self.curr_pts
+        if len(p0) == 0:
+            return 0
         features = np.expand_dims(p0.squeeze(1),0)
         for i in range(len(pred_id)-1):
             frame0, frame1 = self.cache.frames[pred_id[i]], self.cache.frames[pred_id[i+1]]
@@ -265,7 +278,11 @@ class Tracker:
             harris = False    
         p0 = cv2.goodFeaturesToTrack(self.first_gray, mask=mask_use, maxCorners=500, qualityLevel=quality, minDistance=7, useHarrisDetector=harris)
 
-        self.features = np.expand_dims(p0.squeeze(1),0)
+        if p0 is None:
+            p0 = np.empty((0, 1, 2), dtype=np.float32)
+            self.features = np.empty((1, 0, 2), dtype=np.float32)
+        else:
+            self.features = np.expand_dims(p0.squeeze(1), 0)
         self.prev_pts = p0
         self.curr_pts = p0
 
@@ -274,10 +291,17 @@ class Tracker:
         t2 = time.time()
         return 0
     
-    def OpticalFlow(self):  
+    def OpticalFlow(self):
 
         t1 = time.time()
         self.jumped = False
+
+        if len(self.curr_pts) == 0:
+            self.prev_gray = self.curr_gray.copy()
+            self.curr_gray = self.get_gray_img(self.curr_id)
+            self.prev_id = self.curr_id
+            self.curr_id = self.curr_id + 1
+            return 0
 
         p1,st,_ = cv2.calcOpticalFlowPyrLK(self.prev_gray, self.curr_gray, self.curr_pts, None,winSize=(15,15),maxLevel=10)
 
@@ -407,7 +431,7 @@ class Tracker:
                     
                     n_bbox = xyxy2xywh(np.array([left,top,right,bottom])/np.array([fw,fh,fw,fh]))
                     iou = box_iou_np(np.expand_dims(xywh2xyxy(n_bbox),0),xywh2xyxyn(self.curr_box))
-                    if max(iou[0]) > 0.3:
+                    if len(iou[0]) and max(iou[0]) > 0.3:
                         continue
                     self.curr_box = np.concatenate([self.curr_box,np.expand_dims(n_bbox,0)],0)
                     self.cls = np.append(self.cls, -1)
@@ -493,7 +517,11 @@ class Tracker:
     
     def FDC(self):
 
-        boxes0, boxes = np.array(self.label)[:,1:], self.curr_box  
+        if self.label.ndim == 2:
+            boxes0 = self.label[:,1:]
+        else:
+            boxes0 = np.empty((0, 4))
+        boxes = self.curr_box
         boxes_p = self.prev_box
         img0_d, img1 = self.prev_gray, self.curr_gray 
         img2 = self.get_gray_img(self.curr_id)
@@ -582,24 +610,35 @@ def get_cost(label,speed,feature):
         dis = tracklets[:,track_len-1,:] - tracklets[:,0,:]  
 
         dis_x, dis_y = dis[:,0], dis[:,1]
-        dis = np.linalg.norm(dis, axis=1)  
-        # print(f"[DEBUG] 框{i}的dis长度: {len(dis)}, dis内容: {dis}") 
-        mean_dis = np.mean(dis)
-        norm_length = dis/mean_dis
+        dis = np.linalg.norm(dis, axis=1)
 
-        
-        # print(f"[DEBUG] 框{i}的dis长度是否>1: {len(dis)>1}")
-        dis_var = (np.std((dis_x/dis*norm_length))+np.std((dis_y/dis*norm_length)))/2
+        if len(dis) == 0:
+            vars[i] = 0
+            continue
+        mean_dis = np.mean(dis)
+        if mean_dis == 0:
+            norm_length = np.ones_like(dis)
+        else:
+            norm_length = dis / mean_dis
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            d_x = np.where(dis != 0, dis_x / dis * norm_length, 0)
+            d_y = np.where(dis != 0, dis_y / dis * norm_length, 0)
+            dis_var = (np.std(d_x) + np.std(d_y)) / 2
+        if np.isnan(dis_var):
+            dis_var = 0
 
         vars[i] = dis_var
 
-        if len(tracklets) == 1: 
-            matrix[i][index]=0
+        if len(tracklets) == 1:
+            matrix[i][index] = 0
         if len(tracklets) > 1:
             min_dis_x = min(dis_x)
-            min_dis_y = min(dis_y)             
-            dis_x_n = (dis_x-min_dis_x)/(max(dis_x)-min_dis_x)  
-            dis_y_n = (dis_y-min_dis_y)/(max(dis_y)-min_dis_y)
+            min_dis_y = min(dis_y)
+            denom_x = max(dis_x) - min_dis_x
+            denom_y = max(dis_y) - min_dis_y
+            dis_x_n = (dis_x - min_dis_x) / denom_x if denom_x != 0 else np.zeros_like(dis_x)
+            dis_y_n = (dis_y - min_dis_y) / denom_y if denom_y != 0 else np.zeros_like(dis_y)
             
             moved_id = np.where(dis>move_thrd)[0]
 

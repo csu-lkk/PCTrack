@@ -1,4 +1,5 @@
 .vscode/
+.claude/
 Intersect.7z
 README.md
 __pycache__/
