@@ -9,6 +9,7 @@ corrector.py
 data/
 datasets/
 detector.py
+eval.py
 draw/
 model/
 result/
