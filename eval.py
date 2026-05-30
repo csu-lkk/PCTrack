@@ -74,9 +74,6 @@ for filepath,dirnames,filenames in os.walk(rp):
         pcls = pred[:, 0]
         pcls[pcls==-1] = 2  
 
-        iou = box_iou(lbox,pbox)
-        nl,np_ = iou.shape[0],iou.shape[1]
-        
         nc = [i for i in range(80)]
         for c in nc:
             TP = 0 
@@ -99,8 +96,9 @@ for filepath,dirnames,filenames in os.walk(rp):
                 used_l = np.zeros(len(lbox_))
 
                 TPFN = len(lbox_)
-                for i, iiou in enumerate(iou):
-                    max_iou, max_iou_id = max(iiou), np.argmax(iiou)
+                order = np.argsort([max(iiou) for iiou in iou])[::-1]
+                for i in order:
+                    max_iou, max_iou_id = max(iou[i]), np.argmax(iou[i])
                     if max_iou > thred and used_l[max_iou_id] == 0:
                         TP += 1
                         used_l[max_iou_id] = 1
@@ -109,9 +107,8 @@ for filepath,dirnames,filenames in os.walk(rp):
                 precision = TP/(TP+FP) if TP+FP != 0 else 0
                 recall = TP/(TPFN) if TPFN != 0 else 0
                 F1 = 2*precision*recall/(precision+recall) if precision+recall!=0 else 0
-            if fid%1 == 0:
-                total_performance += np.array([precision, recall, F1])
-                count += 1
+            total_performance += np.array([precision, recall, F1])
+            count += 1
         fid += 1
 
 avg_prec, avg_recall, avg_f1 = total_performance[0]/count, total_performance[1]/count, total_performance[2]/count
