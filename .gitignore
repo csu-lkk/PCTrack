@@ -9,7 +9,6 @@ data/
 datasets/
 detector.py
 draw/
-eval.py
 model/
 result/
 runs/
